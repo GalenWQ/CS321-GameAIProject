@@ -1,19 +1,22 @@
+"""Modified from tutorial code. Contains class for a DQN agent, and function to test that class"""
+from sys import argv
 import random
 import gym
 import numpy as np
 from collections import deque
 from keras.models import Sequential
-from keras.layers import Conv2D, Dense
+from keras.layers import Conv2D, Dense, MaxPooling2D
 from keras.optimizers import Adam
 
-EPISODES = 1000
+EPISODES = 10000
 
 
 class DQNAgent:
+    """Class for a DQN agent"""
     def __init__(self, state_dimensions, action_size):
         self.state_dimensions = state_dimensions
         self.action_size = action_size
-        self.memory = deque(maxlen=2000)
+        self.memory = deque()  # note: removed maxlen
         self.gamma = 0.95    # discount rate
         self.epsilon = 1.0  # exploration rate
         self.epsilon_min = 0.01
@@ -22,34 +25,39 @@ class DQNAgent:
         self.model = self._build_model()
 
     def _build_model(self):
-        # Neural Net for Deep-Q learning Model
-
-
+        """Builds a Keras Sequential model for neural net Deep-Q learning."""
         model = Sequential()
         # activation(dot(input, kernel) + bias) Three fully connected layers used here
         # this is a pretty sweet deal for this to be reduced to just this
-        model.add(Conv2D(128, 3, 3, input_shape=self.state_dimensions, activation='relu'))
-        model.add(Conv2D(128, 3, 3, activation='relu'))
+
+
+        # TODO: first experiment with window size of first layer 128, 210, 420 (first just get it running)
+        # second: with the best result, change kernel size to 4,6,8
+        # third: figure out what its saving
+        # fourth: figure out how to stop from rendering
+        # fifth: comment up 
+        
+        model.add(Conv2D(210, 4, strides=3, input_shape=self.state_dimensions, activation='relu'))
+        model.add(MaxPooling2D(pool_size=(3, 3)))
+        model.add(Conv2D(64, 3, strides=3, activation='relu'))
         model.add(Dense(self.action_size, activation='linear'))
 
-
-        model.compile(loss='mse',
-                      optimizer=Adam(lr=self.learning_rate))
+        model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
         return model
 
     def remember(self, state, action, reward, next_state, done):
-        # this keeps track of the state
+        """Keeps track of the state"""
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state):
-        #this is the random choice of acts
+        """Randomly either return a random action or prediction from model, based on exploration rate"""
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_size)
         act_values = self.model.predict(state)
         return np.argmax(act_values[0][0][0])  # returns action
 
     def replay(self, batch_size):
-        #This is where reward happens
+        """This is where reward happens"""
         minibatch = random.sample(self.memory, batch_size)
         for state, action, reward, next_state, done in minibatch:
             #print("state:", state)
@@ -62,8 +70,7 @@ class DQNAgent:
 
             if not done:
                 # This predicts the reward
-                target = (reward + self.gamma *
-                          np.amax(self.model.predict(next_state)))
+                target = (reward + self.gamma * np.amax(self.model.predict(next_state)))
             target_f = self.model.predict(state)
             target_f[0][action] = target
             self.model.fit(state, target_f, epochs=1, verbose=0)
@@ -77,22 +84,29 @@ class DQNAgent:
         self.model.save_weights(name)
 
 
-if __name__ == "__main__":
+def main():
+    if len(argv) <= 1:
+        raise ValueError("No save filename given.")
+    save_file_name = argv[1]
+    
     env = gym.make('Breakout-v0')
     state_dimensions = env.observation_space.shape
     action_size = env.action_space.n
     state = env.reset()
     #print("state:", state)
     agent = DQNAgent(state_dimensions, action_size)
-    # agent.load("./save/cartpole-dqn.h5")
+    if len(argv) >= 3:
+        agent.load(argv[2])
     done = False
     batch_size = 32
 
     for e in range(EPISODES):
         state = env.reset()
-        #print("state:", state)
+        print("state.shape:", state.shape)
         #state = np.reshape(state, [4, ])
         state = np.expand_dims(state, axis=0)
+        print("expanded state.shape:", state.shape)
+        input()
         #state = [1, 2, 3, 4]
         while not done:
             #print("going")
@@ -117,4 +131,9 @@ if __name__ == "__main__":
         done = False
 
         if e % 10 == 0:
-            agent.save("save.h5")
+            agent.save(save_file_name)
+            # agent.save("save.h5")            
+    
+if __name__ == "__main__":
+    main()
+   
