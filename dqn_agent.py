@@ -117,7 +117,7 @@ def main():
             state = next_state
 
             # If environment is Breakout, then score is sum of rewards.
-            if env.spec() == gym.spec("Breakout-v0"):
+            if env.spec == gym.spec("Breakout-v0"):
                 score += int(reward)
 
         print("episode: {}/{}, e: {:.2}, score: {}".format(e, episodes, agent.epsilon, score))
