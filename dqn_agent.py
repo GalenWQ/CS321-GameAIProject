@@ -1,23 +1,68 @@
+import os
+from warnings import filterwarnings
+
+# Suppress warnings that are impossible to fix
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+filterwarnings("ignore", ".*compiletime version.*tensorflow.*", RuntimeWarning)
+
 from sys import argv
 import random
-import gym
 import numpy as np
-from collections import deque
 from keras.models import Sequential
-from keras.layers import Conv2D, Dense, Flatten
+from keras.layers import Conv2D, Dense, Flatten, TimeDistributed, Reshape
 from keras.optimizers import Adam
+from keras.utils import plot_model
+from environment import env
+
+
+class FiniteBuffer:
+    """Finite memory buffer for DQNAgent's memory. Would have used deque, but it has slow random indexing."""
+
+    def __init__(self, size, initial_data=None):
+        """Construct a finite size buffer"""
+        if not isinstance(size, int) or size < 0:
+            raise TypeError("Size must be non-negative integer")
+        self.size = size
+        self.index = 0
+        self.is_full = False
+        self.data = [None for x in range(size)]
+        if initial_data:
+            for item in initial_data:
+                self.append(item)
+
+    def append(self, item):
+        if self.index == self.size:
+            self.is_full = True
+            self.index = 0
+        self.data[self.index] = item
+        self.index += 1
+
+    def get_sample(self, k):
+        """Return k randomly selected items from the buffer"""
+        end = None if self.is_full else self.index
+        return random.sample(self.data[:end], k)
+
+    def __len__(self):
+        if self.is_full:
+            return self.size
+        return self.index
 
 
 class DQNAgent:
     """Class for a DQN agent."""
 
-    def __init__(self, state_dimensions, action_size):
-        self.state_dimensions = state_dimensions
+    def __init__(self, state_shape, state_dtype, frames_per_observation, action_size):
+        self.state_shape = state_shape
+        self.state_dtype = state_dtype
         self.action_size = action_size
-        self.memory = deque(maxlen=10000)  # TODO: consider changing max length
-        self.gamma = 0.95  # discount rate
+        self.m = frames_per_observation
+        obs_shape = (self.m,) + state_shape
+        self.mem_dtype = np.dtype([("observation", state_dtype, obs_shape), ("action", np.uint8), ("reward", np.uint16),
+                                   ("next_observation", state_dtype, obs_shape), ("done", np.bool_)])
+        self.buffer = FiniteBuffer(size=200000)
+        self.gamma = 0.99  # discount rate
         self.epsilon = 1.0  # exploration rate
-        self.epsilon_min = 0.01
+        self.epsilon_min = 0.05
         self.epsilon_decay = 0.995
         self.learning_rate = 0.001
         self.model = self._build_model()
@@ -25,50 +70,57 @@ class DQNAgent:
     def _build_model(self):
         """Builds a Keras Sequential model for neural net Deep-Q learning."""
         model = Sequential()
-        # model.add(Conv2D(210, 4, strides=3, input_shape=self.state_dimensions, activation='relu'))
-        # model.add(MaxPooling2D(pool_size=(3, 3)))
-        # model.add(Conv2D(64, 3, strides=3, activation='relu'))
-        # model.add(Dense(self.action_size, activation='linear'))
 
-        # Intended these layers to be a smaller version of what the DeepMind team did
-        # TODO: play around with this.
-        model.add(Conv2D(20, 6, strides=3, input_shape=self.state_dimensions, activation='relu'))
-        model.add(Conv2D(48, 4, strides=2, activation='relu'))
+        # Apply conv_1 to each frame, separately, with TimeDistributed wrapper
+        conv_1 = TimeDistributed(Conv2D(20, 8, strides=4, input_shape=self.state_shape, activation='relu'),
+                                 input_shape=(self.m, *self.state_shape))
+        model.add(conv_1)
+        # conv_2 = TimeDistributed(Conv2D(48, 4, strides=2, activation='relu'))
+        # model.add(conv_2)
+        # shape = list(conv_2.output_shape)[1:]
+        # shape[-1] *= shape[0]
+        # model.add(Reshape(shape[1:]))
+
+        shape = list(conv_1.output_shape)[1:]
+        shape[-1] *= shape[0]
+        model.add(Reshape(shape[1:]))
+        conv_2 = Conv2D(48, 4, strides=2, activation='relu')
+        model.add(conv_2)
+
         model.add(Conv2D(48, 3, strides=1, activation='relu'))
         model.add(Flatten())
         model.add(Dense(256, activation='relu'))
         model.add(Dense(self.action_size, activation='linear'))
-
         model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
         return model
 
-    def remember(self, state, action, reward, next_state, done):
+    def remember(self, observation, action, reward, next_observation, done):
         """Add the given decision description to memory."""
-        self.memory.append((state, action, reward, next_state, done))
+        memory = np.array((observation, action, reward, next_observation, done), self.mem_dtype)
+        self.buffer.append(memory)
 
-    def act(self, state):
+    def act(self, observation):
         """Randomly either return a random action or prediction from model, based on exploration rate"""
         if random.random() <= self.epsilon:
             return random.randrange(self.action_size)
         # Note: "state[None]" is the same as "np.array([state])" or "np.expand_dims(state, 0)", but faster
-        act_values = self.model.predict(state[None])[0]
-        return np.argmax(act_values)
+        predicted_rewards = self.model.predict(observation[None])[0]
+        return np.argmax(predicted_rewards)
 
     def replay(self, batch_size):
         """This is where reward happens"""
-        batch = random.sample(self.memory, batch_size)
-        for state, action, reward, next_state, done in batch:
-            # print("state:", state)
-            # print("action:", action)
-            # print("reward:", reward)
-            # print("next_state:", next_state)
-            # print("done:", done)
-            target = reward
-            if not done:
-                target = reward + self.gamma * np.amax(self.model.predict(next_state[None]))
-            target_f = self.model.predict(state[None])
-            target_f[0][action] = target
-            self.model.fit(state[None], target_f, batch_size=1, verbose=0)
+        memories = np.array(self.buffer.get_sample(batch_size))
+        memories = memories.transpose()
+        observations = memories["observation"]
+        next_observations = memories["next_observation"]
+        predicted_rewards = self.gamma * np.amax(self.model.predict(next_observations), axis=1)
+        predicted_rewards *= memories["done"].astype(np.uint8)
+        target_rewards = memories["reward"] + predicted_rewards
+        target_outputs = self.model.predict(observations)
+        for i in range(batch_size):
+            target_outputs[i][memories["action"][i]] = target_rewards[i]
+        v = 0 if random.random() <= .9 else 1
+        self.model.fit(observations, target_outputs, batch_size=32, verbose=v)
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
@@ -82,46 +134,52 @@ class DQNAgent:
         """Prints input/output format of each layer in the agent's model. Useful for testing."""
         for layer in self.model.layers:
             print("input: {},\noutput: {}".format(layer.input, layer.output))
+        plot_model(self.model, "model.png")
+
+
+def preprocess_image(frame):
+    return frame[::2, ::2, :]
 
 
 def main():
-    """Uses command line arguments for save/load filename for weights. Trains agent on Breakout-v0"""
+    """Uses command line arguments for save/load filename for weights."""
     if len(argv) <= 1:
         raise ValueError("No save filename given.")
-    save_file_name = argv[1]
-
-    env = gym.make('Breakout-v0')
-    state_dimensions = env.observation_space.shape
-    action_size = env.action_space.n
-    agent = DQNAgent(state_dimensions, action_size)
     if len(argv) >= 3:
         episodes = int(argv[2])
     else:
         episodes = 1000
+    save_file_name = argv[1]
+    frames_per_observation = 4
+    # agent = DQNAgent(env.observation_space.shape, env.observation_space.dtype, frames_per_observation,
+    #                  env.action_space.n)
+    space = preprocess_image(env.reset())
+    agent = DQNAgent(space.shape, space.dtype, frames_per_observation, env.action_space.n)
     if len(argv) >= 4:
         agent.load(argv[3])
 
-    # TODO: think about batch size
-    batch_size = 48
-
     for e in range(episodes):
         score = 0
-        state = env.reset()
+        observation = np.array([preprocess_image(env.reset())] * 4)
         done = False
         while not done:
-            # Rendering takes very little time compared to learning.
-            env.render()
-            action = agent.act(state)
-            next_state, reward, done, _ = env.step(action)
-            agent.remember(state, action, reward, next_state, done)
-            state = next_state
-
-            # If environment is Breakout, then score is sum of rewards.
-            if env.spec == gym.spec("Breakout-v0"):
+            action = agent.act(observation)
+            obs_reward = 0
+            next_observation = []
+            for i in range(frames_per_observation):
+                # Rendering takes very little time compared to learning.
+                env.render()
+                frame, reward, done, _ = env.step(action)
+                processed = preprocess_image(frame)
+                next_observation.append(processed)
+                obs_reward += reward
+                # If environment is Breakout, then score is sum of rewards.
                 score += int(reward)
-
+            next_observation = np.array(next_observation)
+            agent.remember(observation, action, obs_reward, next_observation, done)
+            observation = next_observation
         print("episode: {}/{}, e: {:.2}, score: {}".format(e, episodes, agent.epsilon, score))
-        agent.replay(batch_size)
+        agent.replay(32)
         if e % 10 == 0:
             agent.save(save_file_name)
 
