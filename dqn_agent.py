@@ -59,7 +59,7 @@ class DQNAgent:
         obs_shape = (self.m,) + state_shape
         self.mem_dtype = np.dtype([("observation", state_dtype, obs_shape), ("action", np.uint8), ("reward", np.uint16),
                                    ("next_observation", state_dtype, obs_shape), ("done", np.bool_)])
-        self.buffer = FiniteBuffer(size=200000)
+        self.buffer = FiniteBuffer(size=10000)
         self.gamma = 0.99  # discount rate
         self.epsilon = 1.0  # exploration rate
         self.epsilon_min = 0.05
@@ -119,7 +119,8 @@ class DQNAgent:
         target_outputs = self.model.predict(observations)
         for i in range(batch_size):
             target_outputs[i][memories["action"][i]] = target_rewards[i]
-        v = 0 if random.random() <= .9 else 1
+        # v = 0 if random.random() <= .9 else 1
+        v = 0
         self.model.fit(observations, target_outputs, batch_size=32, verbose=v)
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
@@ -138,7 +139,8 @@ class DQNAgent:
 
 
 def preprocess_image(frame):
-    return frame[::2, ::2, :]
+    frame = np.average(frame, axis=-1, weights=[.2125, .7154, .0721]).astype(np.uint8)[..., None]
+    return frame[::2, ::2]
 
 
 def main():
@@ -148,7 +150,7 @@ def main():
     if len(argv) >= 3:
         episodes = int(argv[2])
     else:
-        episodes = 1000
+        episodes = 10000
     save_file_name = argv[1]
     frames_per_observation = 4
     # agent = DQNAgent(env.observation_space.shape, env.observation_space.dtype, frames_per_observation,
@@ -161,10 +163,11 @@ def main():
     for e in range(episodes):
         score = 0
         observation = np.array([preprocess_image(env.reset())] * 4)
+        obs_reward = 0
         done = False
         while not done:
             action = agent.act(observation)
-            obs_reward = 0
+            next_obs_reward = 0
             next_observation = []
             for i in range(frames_per_observation):
                 # Rendering takes very little time compared to learning.
@@ -172,17 +175,22 @@ def main():
                 frame, reward, done, _ = env.step(action)
                 processed = preprocess_image(frame)
                 next_observation.append(processed)
-                obs_reward += reward
+                next_obs_reward += reward
                 # If environment is Breakout, then score is sum of rewards.
                 score += int(reward)
             next_observation = np.array(next_observation)
+            # display_obs(observation)
+            # display_obs(next_observation)
             agent.remember(observation, action, obs_reward, next_observation, done)
             observation = next_observation
+            obs_reward = next_obs_reward
         print("episode: {}/{}, e: {:.2}, score: {}".format(e, episodes, agent.epsilon, score))
-        agent.replay(32)
+        batch_size = min(128, len(agent.buffer))
+        agent.replay(batch_size)
         if e % 10 == 0:
             agent.save(save_file_name)
-
+            print("buffer: {}/ {}. size: {} mb".format(len(agent.buffer), agent.buffer.size,
+                                                       agent.buffer.data[0].nbytes * len(agent.buffer) / (10 ** 6)))
 
 if __name__ == "__main__":
     main()
