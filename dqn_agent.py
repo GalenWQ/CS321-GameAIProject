@@ -10,12 +10,13 @@ import numpy as np
 from keras.models import Sequential
 from keras.layers import Conv2D, Dense, Flatten, TimeDistributed
 from keras.optimizers import Adam
-from keras.utils import plot_model, print_summary
-from environment import env
+from keras.utils import print_summary
+from environment import *
 
 
 class FiniteBuffer:
     """Finite memory buffer for DQNAgent's memory. Would have used deque, but it has slow random indexing."""
+
     def __init__(self, size, initial_data=None):
         """Construct a finite size buffer"""
         if not isinstance(size, int) or size < 0:
@@ -68,17 +69,18 @@ class DQNAgent:
 
     def _build_model(self):
         """Builds a Keras Sequential model for neural net Deep-Q learning."""
-
-
-        # Apply conv_1 to each frame, separately, with TimeDistributed wrapper
-        conv_1 = Conv2D(20, 8, strides=4, input_shape=self.state_shape, activation='relu')
-        conv_2 = Conv2D(48, 4, strides=2, activation='relu')
-        conv_3 = Conv2D(48, 3, strides=1, activation='relu')
-        dense = Dense(128, activation='relu')
-        final = Dense(self.action_size, activation='linear')
-        input_ = TimeDistributed(conv_1, input_shape=self.obs_shape)
-        model = Sequential((input_, TimeDistributed(conv_2), TimeDistributed(conv_3), TimeDistributed(Flatten()),
-                            TimeDistributed(dense), Flatten(), final))
+        if "ram" in version:
+            input_ = TimeDistributed(Dense(256), input_shape=self.obs_shape)
+            final = Dense(self.action_size)
+            model = Sequential((input_, Flatten(), final))
+        else:
+            conv_1 = Conv2D(20, 8, strides=4, input_shape=self.state_shape, activation='relu')
+            conv_2 = Conv2D(48, 4, strides=2, activation='relu')
+            conv_3 = Conv2D(48, 3, strides=1, activation='relu')
+            dense = Dense(256, activation='relu')
+            final = Dense(self.action_size, activation='linear')
+            input_ = TimeDistributed(conv_1, input_shape=self.obs_shape)
+            model = Sequential((input_, TimeDistributed(conv_2), TimeDistributed(conv_3), Flatten(), dense, final))
 
         model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
         return model
@@ -122,39 +124,39 @@ class DQNAgent:
 
     def layer_description(self):
         """Prints input/output format of each layer in the agent's model. Useful for testing."""
-        for layer in self.model.layers:
-            print("input: {},\noutput: {}".format(layer.input, layer.output))
-        plot_model(self.model, "model.png")
+        print_summary(self.model)
 
 
-def preprocess_image(frame):
-    frame = np.average(frame, axis=-1, weights=[.2125, .7154, .0721]).astype(np.uint8)[..., None]
-    return frame[::2, ::2]
+def preprocess_frame(frame):
+    if "ram" in version:
+        return frame[..., None]
+    else:
+        frame = np.average(frame, axis=-1, weights=[.2125, .7154, .0721]).astype(np.uint8)[..., None]
+        return frame[::2, ::2]
 
 
 def main():
-    """Uses command line arguments for save/load filename for weights."""
-
-    if len(argv) <= 1:
-        raise ValueError("No save filename given.")
+    """Uses command line arguments for save/load filename for weights, # of episodes"""
     if len(argv) >= 3:
         episodes = int(argv[2])
     else:
         episodes = 10000
-    save_file_name = argv[1]
+    if len(argv) >= 2:
+        save_file_name = argv[1]
+    else:
+        save_file_name = None
     frames_per_observation = 4
     # agent = DQNAgent(env.observation_space.shape, env.observation_space.dtype, frames_per_observation,
     #                  env.action_space.n)
-    space = preprocess_image(env.reset())
-    agent = DQNAgent(space.shape, space.dtype, frames_per_observation, env.action_space.n)
+    frame = preprocess_frame(env.reset())
+    agent = DQNAgent(frame.shape, frame.dtype, frames_per_observation, env.action_space.n)
     if len(argv) >= 4:
         agent.load(argv[3])
     print_summary(agent.model)
-    plot_model(agent.model, to_file="model.png")
 
     for e in range(episodes):
         score = 0
-        last_observation = np.array([preprocess_image(env.reset())] * 4)
+        last_observation = np.array([preprocess_frame(env.reset())] * 4)
         last_obs_reward = 0
         done = False
         while not done:
@@ -165,7 +167,7 @@ def main():
                 # Rendering takes very little time compared to learning.
                 env.render()
                 frame, reward, done, _ = env.step(action)
-                processed = preprocess_image(frame)
+                processed = preprocess_frame(frame)
                 observation.append(processed)
                 obs_reward += reward
                 # If environment is Breakout, then score is sum of rewards.
@@ -179,9 +181,11 @@ def main():
         batch_size = min(128, len(agent.buffer))
         agent.replay(batch_size)
         if e % 10 == 0:
-            agent.save(save_file_name)
+            if save_file_name:
+                agent.save(save_file_name)
             print("buffer: {}/ {}. size: {} mb".format(len(agent.buffer), agent.buffer.size,
                                                        agent.buffer.data[0].nbytes * len(agent.buffer) / (10 ** 6)))
+
 
 if __name__ == "__main__":
     main()
