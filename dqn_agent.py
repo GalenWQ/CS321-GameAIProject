@@ -4,20 +4,18 @@ from warnings import filterwarnings
 # Suppress warnings that are impossible to fix
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 filterwarnings("ignore", ".*compiletime version.*tensorflow.*", RuntimeWarning)
-
 from sys import argv
 import random
 import numpy as np
 from keras.models import Sequential
-from keras.layers import Conv2D, Dense, Flatten, TimeDistributed, Reshape
+from keras.layers import Conv2D, Dense, Flatten, TimeDistributed
 from keras.optimizers import Adam
-from keras.utils import plot_model
+from keras.utils import plot_model, print_summary
 from environment import env
 
 
 class FiniteBuffer:
     """Finite memory buffer for DQNAgent's memory. Would have used deque, but it has slow random indexing."""
-
     def __init__(self, size, initial_data=None):
         """Construct a finite size buffer"""
         if not isinstance(size, int) or size < 0:
@@ -56,9 +54,10 @@ class DQNAgent:
         self.state_dtype = state_dtype
         self.action_size = action_size
         self.m = frames_per_observation
-        obs_shape = (self.m,) + state_shape
-        self.mem_dtype = np.dtype([("observation", state_dtype, obs_shape), ("action", np.uint8), ("reward", np.uint16),
-                                   ("next_observation", state_dtype, obs_shape), ("done", np.bool_)])
+        self.obs_shape = (self.m,) + state_shape
+        self.mem_dtype = np.dtype(
+            [("observation", state_dtype, self.obs_shape), ("action", np.uint8), ("reward", np.uint16),
+             ("next_observation", state_dtype, self.obs_shape), ("done", np.bool_)])
         self.buffer = FiniteBuffer(size=10000)
         self.gamma = 0.99  # discount rate
         self.epsilon = 1.0  # exploration rate
@@ -69,28 +68,18 @@ class DQNAgent:
 
     def _build_model(self):
         """Builds a Keras Sequential model for neural net Deep-Q learning."""
-        model = Sequential()
+
 
         # Apply conv_1 to each frame, separately, with TimeDistributed wrapper
-        conv_1 = TimeDistributed(Conv2D(20, 8, strides=4, input_shape=self.state_shape, activation='relu'),
-                                 input_shape=(self.m, *self.state_shape))
-        model.add(conv_1)
-        # conv_2 = TimeDistributed(Conv2D(48, 4, strides=2, activation='relu'))
-        # model.add(conv_2)
-        # shape = list(conv_2.output_shape)[1:]
-        # shape[-1] *= shape[0]
-        # model.add(Reshape(shape[1:]))
-
-        shape = list(conv_1.output_shape)[1:]
-        shape[-1] *= shape[0]
-        model.add(Reshape(shape[1:]))
+        conv_1 = Conv2D(20, 8, strides=4, input_shape=self.state_shape, activation='relu')
         conv_2 = Conv2D(48, 4, strides=2, activation='relu')
-        model.add(conv_2)
+        conv_3 = Conv2D(48, 3, strides=1, activation='relu')
+        dense = Dense(128, activation='relu')
+        final = Dense(self.action_size, activation='linear')
+        input_ = TimeDistributed(conv_1, input_shape=self.obs_shape)
+        model = Sequential((input_, TimeDistributed(conv_2), TimeDistributed(conv_3), TimeDistributed(Flatten()),
+                            TimeDistributed(dense), Flatten(), final))
 
-        model.add(Conv2D(48, 3, strides=1, activation='relu'))
-        model.add(Flatten())
-        model.add(Dense(256, activation='relu'))
-        model.add(Dense(self.action_size, activation='linear'))
         model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
         return model
 
@@ -121,7 +110,7 @@ class DQNAgent:
             target_outputs[i][memories["action"][i]] = target_rewards[i]
         # v = 0 if random.random() <= .9 else 1
         v = 0
-        self.model.fit(observations, target_outputs, batch_size=32, verbose=v)
+        self.model.fit(observations, target_outputs, batch_size=batch_size, verbose=v)
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
@@ -145,6 +134,7 @@ def preprocess_image(frame):
 
 def main():
     """Uses command line arguments for save/load filename for weights."""
+
     if len(argv) <= 1:
         raise ValueError("No save filename given.")
     if len(argv) >= 3:
@@ -159,31 +149,32 @@ def main():
     agent = DQNAgent(space.shape, space.dtype, frames_per_observation, env.action_space.n)
     if len(argv) >= 4:
         agent.load(argv[3])
+    print_summary(agent.model)
+    plot_model(agent.model, to_file="model.png")
 
     for e in range(episodes):
         score = 0
-        observation = np.array([preprocess_image(env.reset())] * 4)
-        obs_reward = 0
+        last_observation = np.array([preprocess_image(env.reset())] * 4)
+        last_obs_reward = 0
         done = False
         while not done:
-            action = agent.act(observation)
-            next_obs_reward = 0
-            next_observation = []
+            action = agent.act(last_observation)
+            obs_reward = 0
+            observation = []
             for i in range(frames_per_observation):
                 # Rendering takes very little time compared to learning.
                 env.render()
                 frame, reward, done, _ = env.step(action)
                 processed = preprocess_image(frame)
-                next_observation.append(processed)
-                next_obs_reward += reward
+                observation.append(processed)
+                obs_reward += reward
                 # If environment is Breakout, then score is sum of rewards.
                 score += int(reward)
-            next_observation = np.array(next_observation)
+            observation = np.array(observation)
             # display_obs(observation)
-            # display_obs(next_observation)
-            agent.remember(observation, action, obs_reward, next_observation, done)
-            observation = next_observation
-            obs_reward = next_obs_reward
+            agent.remember(last_observation, action, last_obs_reward, observation, done)
+            last_observation = observation
+            last_obs_reward = obs_reward
         print("episode: {}/{}, e: {:.2}, score: {}".format(e, episodes, agent.epsilon, score))
         batch_size = min(128, len(agent.buffer))
         agent.replay(batch_size)
